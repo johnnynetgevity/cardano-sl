@@ -47,8 +47,8 @@ spec =
       describe "Using hand-written inductive wallets, computes the expected block metadata for" $ do
           it "...blockMetaScenarioA" $ bracketActiveWallet $ checkBlockMeta' (blockMetaScenarioA genesis)
           it "...blockMetaScenarioB" $ bracketActiveWallet $ checkBlockMeta' (blockMetaScenarioB genesis)
-          --it "...blockMetaScenarioC" $ bracketActiveWallet $ checkBlockMeta' (blockMetaScenarioC genesis)
-          --it "...blockMetaScenarioD" $ bracketActiveWallet $ checkBlockMeta' (blockMetaScenarioD genesis)
+          it "...blockMetaScenarioC" $ bracketActiveWallet $ checkBlockMeta' (blockMetaScenarioC genesis)
+          it "...blockMetaScenarioD" $ bracketActiveWallet $ checkBlockMeta' (blockMetaScenarioD genesis)
           it "...blockMetaScenarioE" $ bracketActiveWallet $ checkBlockMeta' (blockMetaScenarioE genesis)
 
       describe "Using hand-written inductive wallets" $ do

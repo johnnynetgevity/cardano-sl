@@ -34,7 +34,9 @@ import           Universum hiding (State, init)
 
 import           Control.Concurrent.Async (async, cancel)
 import           Control.Concurrent.MVar (modifyMVar, modifyMVar_)
+
 import qualified Data.Map.Strict as Map
+import qualified Data.List.NonEmpty as NE
 
 import           System.Wlog (Severity (..))
 
@@ -47,8 +49,8 @@ import           Cardano.Wallet.Kernel.Internal
 import           Cardano.Wallet.Kernel.Diffusion (WalletDiffusion (..))
 import           Cardano.Wallet.Kernel.Keystore (Keystore)
 import qualified Cardano.Wallet.Kernel.Keystore as Keystore
-import           Cardano.Wallet.Kernel.PrefilterTx (PrefilteredBlock (..),
-                     prefilterBlock)
+import           Cardano.Wallet.Kernel.PrefilterTx (AddrWithId, PrefilteredBlock (..),
+                     prefilter, prefilterBlock)
 import           Cardano.Wallet.Kernel.Types (WalletId (..))
 
 import           Cardano.Wallet.Kernel.DB.AcidState (ApplyBlock (..),
@@ -72,9 +74,10 @@ import           Cardano.Wallet.Kernel.DB.Read as Getters
 
 import           Pos.Core (ProtocolMagic)
 import           Pos.Core.Chrono (OldestFirst)
-import           Pos.Core.Txp (TxAux (..))
-import           Pos.Crypto (hash)
+import           Pos.Core.Txp (Tx (..), TxAux (..), TxOut (..))
+import           Pos.Crypto (EncryptedSecretKey, hash)
 import           Pos.DB.BlockIndex (getTipHeader)
+import           Pos.Wallet.Web.Tracking.Decrypt (eskToWalletDecrCredentials)
 
 {-------------------------------------------------------------------------------
   Passive Wallet Resource Management
@@ -234,15 +237,37 @@ bracketActiveWallet walletProtocolMagic walletPassive walletDiffusion runActiveW
 --
 -- If the pending transaction is successfully added to the wallet state, the
 -- submission layer is notified accordingly.
+--
+-- NOTE: we select "our" output addresses from the transaction and pass it along to the data layer
 newPending :: ActiveWallet -> HdAccountId -> TxAux -> IO (Either NewPendingError ())
 newPending ActiveWallet{..} accountId tx = do
-    res <- update' (walletPassive ^. wallets) $ NewPending accountId (InDb tx)
-    case res of
-        Left e -> return (Left e)
-        Right () -> do
-            let txId = hash . taTx $ tx
-            modifyMVar_ walletSubmission (return . addPending accountId (singletonPending txId tx))
-            return $ Right ()
+    withKeystore walletPassive $ \ks -> do
+        esk <- lookupESK ks
+        res <- update' (walletPassive ^. wallets) $ NewPending accountId (InDb tx) (ourAddrs esk)
+        case res of
+            Left e -> return (Left e)
+            Right () -> do
+                let txId = hash . taTx $ tx
+                modifyMVar_ walletSubmission (return . addPending accountId (singletonPending txId tx))
+                return $ Right ()
+    where
+        allAddrs = NE.toList $ map txOutAddress (_txOutputs . taTx $ tx)
+        wid      = WalletIdHdRnd (accountId ^. hdAccountIdParent)
+
+        -- TODO (@uroboros/ryan) decide what to do with this error
+        lookupESK :: Keystore -> IO EncryptedSecretKey
+        lookupESK ks' = do
+            mbEsk <- Keystore.lookup wid ks'
+            case mbEsk of
+                 Nothing  -> error "TODO Could not retrieve the Keystore ESK for this AccountId"
+                 Just esk' -> return esk'
+
+        ourAddrs :: EncryptedSecretKey -> [AddrWithId]
+        ourAddrs esk' =
+            map swap $ prefilter wKey identity allAddrs
+            where
+                wKey = (wid, eskToWalletDecrCredentials esk')
+
 
 cancelPending :: PassiveWallet -> Cancelled -> IO ()
 cancelPending passiveWallet cancelled =
