@@ -3,10 +3,12 @@
              FlexibleContexts, ScopedTypeVariables, GADTs, RankNTypes,
              GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE PolyKinds #-}
+{-# LANGUAGE TypeApplications #-}
 module ConsumerProtocol where
 
 import Data.Word
 import Data.Functor (($>))
+import Data.Functor.Const (Const)
 import Data.Functor.Sum (Sum (..))
 import Data.List (tails, foldl')
 --import Data.Maybe
@@ -63,7 +65,7 @@ instance MonadProbe IO where
     time <- getPOSIXTime
     modifyIORef' p ((time, o):)
 
-class (Monad m, TimeMeasure (Time m)) => MonadTimer m where
+class TimeMeasure (Time m) => MonadTimer m where
   type Time m :: *
   timer :: Duration (Time m) -> m () -> m ()
 
@@ -231,34 +233,40 @@ producerSideProtocol1 tryReadChainUpdate readChainUpdate rid chan =
 -- | Given two sides of a protocol, ...
 --
 simulateWire
-  :: (SimChan (SimMVar s) p c -> Free (SimF SimProbe VTimeDuration (SimMVar s) s) ())
-  -> (SimChan (SimMVar s) c p -> Free (SimF SimProbe VTimeDuration (SimMVar s) s) ())
-  -> Free (Sum (SimF SimProbe VTimeDuration (SimMVar s) s) (SendRecvF (SimChan (SimMVar s)))) ()
+  :: forall probe time mvar g p c s .
+     (SimChan mvar p c -> Free (Sum (SimF (SendRecvF (SimChan mvar)) probe time mvar s) (SendRecvF (SimChan mvar))) ())
+  -> (SimChan mvar c p -> Free (Sum (SimF (SendRecvF (SimChan mvar)) probe time mvar s) (SendRecvF (SimChan mvar))) ())
+  -> Free (Sum (SimF (SendRecvF (SimChan mvar)) probe time mvar s) (SendRecvF (SimChan mvar))) ()
 simulateWire protocolSideA protocolSideB = do
     chan <- newChan
-    hoistFree InL $ fork $ protocolSideA chan
-    hoistFree InL $ fork $ protocolSideB (flipSimChan chan)
+    fork $ protocolSideA chan
+    fork $ protocolSideB (flipSimChan chan)
     return ()
 
+-- |
+-- Simulation monad for protocol testing.
 --
--- Simulation monad for protocol testing
+-- The first argument @g@ allows to extend @SimF@ functor; for example by using
+-- @'SendRecvF' chan@ functor inside @'Fork'@ or @'Timer'@.
 --
-data SimF (probe :: * -> * -> *) time (mvar :: * -> *) s a where
-  Fail         :: String -> SimF probe time mvar s a
+-- A simpler approach would be just to include @'SendRecvF' chan@ constructors
+-- in @'SimF'@, or hard code @'SendRecvF'@ in @'Fork'@ or @'Timer'@ directives.
+data SimF (g :: * -> *) (probe :: * -> * -> *) time (mvar :: * -> *) s a where
+  Fail         :: String -> SimF g probe time mvar s a
 
-  Say          :: [String] -> b -> SimF probe time mvar s b
-  Probe        :: probe s o -> o -> b -> SimF probe time mvar s b
+  Say          :: [String] -> b -> SimF g probe time mvar s b
+  Probe        :: probe s o -> o -> b -> SimF g probe time mvar s b
 
-  Timer        :: time -> Free (SimF probe time mvar s) () -> b -> SimF probe time mvar s b
+  Timer        :: Duration time -> Free (Sum (SimF g probe time mvar s) g) () -> b -> SimF g probe time mvar s b
 
-  Fork         :: Free (SimF probe time mvar s) () -> b  -> SimF probe time mvar s b
-  NewEmptyMVar :: (mvar a -> b) -> SimF probe time mvar s b
-  TakeMVar     :: mvar a -> (a -> b) -> SimF probe time mvar s b
-  PutMVar      :: mvar a ->  a -> b  -> SimF probe time mvar s b
-  TryTakeMVar  :: mvar a -> (Maybe a -> b) -> SimF probe time mvar s b
-  TryPutMVar   :: mvar a -> a -> (Bool -> b) -> SimF probe time mvar s b
+  Fork         :: Free (Sum (SimF g probe time mvar s) g) () -> b -> SimF g probe time mvar s b
+  NewEmptyMVar :: (mvar a -> b) -> SimF g probe time mvar s b
+  TakeMVar     :: mvar a -> (a -> b) -> SimF g probe time mvar s b
+  PutMVar      :: mvar a ->  a -> b  -> SimF g probe time mvar s b
+  TryTakeMVar  :: mvar a -> (Maybe a -> b) -> SimF g probe time mvar s b
+  TryPutMVar   :: mvar a -> a -> (Bool -> b) -> SimF g probe time mvar s b
 
-instance Functor (SimF probe time mvar s) where
+instance Functor (SimF g probe time mvar s) where
     fmap _ (Fail f)           = Fail f
     fmap f (Say ss b)         = Say ss $ f b
     fmap f (Probe p o b)      = Probe p o $ f b
@@ -270,9 +278,9 @@ instance Functor (SimF probe time mvar s) where
     fmap f (TryTakeMVar v k)  = TryTakeMVar v (f . k)
     fmap f (TryPutMVar v a k) = TryPutMVar v a (f . k)
 
-type SimM (probe :: * -> * -> *) time (mvar :: * -> *) s a = Free (SimF probe time mvar s) a
+type SimM (probe :: * -> * -> *) time (mvar :: * -> *) s a = Free (SimF (Const ()) probe time mvar s) a
 
-data SimMVar s a = SimMVar (STRef s (MVarContent s a)) MVarTag
+data SimMVar g s a = SimMVar (STRef s (MVarContent g s a)) MVarTag
 type MVarTag = Tag
 
 newtype SimProbe s a = SimProbe (STRef s (ProbeTrace a))
@@ -281,11 +289,12 @@ type ProbeTrace a = [(VTime, a)]
 newtype VTime         = VTime Int          deriving (Eq, Ord, Show)
 newtype VTimeDuration = VTimeDuration Int  deriving (Eq, Ord, Show, Num, Enum, Real)
 
-data MVarContent s a = MVarEmpty  [a -> Thread s] -- threads blocked in take
-                     | MVarFull a [(a, Thread s)] -- threads blocked in put
+data MVarContent g s a
+    = MVarEmpty  [a -> Thread g s] -- threads blocked in take
+    | MVarFull a [(a, Thread g s)] -- threads blocked in put
 
-type Action s = SimM SimProbe VTimeDuration (SimMVar s) s ()
-data Thread s = Thread ThreadId (Action s)
+type Action g s = Free (Sum (SimF g SimProbe VTime (SimMVar g s) s) g) ()
+data Thread g s = Thread ThreadId (Action g s)
 type ThreadId = ThreadTag
 type ThreadTag = Tag
 type Tag = String -- for annotating the trace
@@ -296,21 +305,32 @@ instance TimeMeasure VTime where
   diffTime (VTime t) (VTime t') = VTimeDuration (t-t')
   addTime  (VTimeDuration d) (VTime t) = VTime (t+d)
 
-instance MonadSay (Free (SimF probe time mvar s)) where
-  say    msg = Free.liftF $ Say [msg] ()
+instance MonadSay (Free (SimF g probe time mvar s)) where
+  say msg = Free.liftF $ Say [msg] ()
 
-instance MonadProbe (Free (SimF SimProbe time mvar s)) where
-  type Probe (Free (SimF SimProbe time mvar s)) = SimProbe s
+instance Functor g => MonadSay (Free (Sum (SimF g probe time mvar s) g)) where
+  say msg = Free.liftF $ InL $ Say [msg] ()
+
+instance MonadProbe (Free (SimF g probe time mvar s)) where
+  type Probe (Free (SimF g probe time mvar s)) = probe s
   probeOutput p o = Free.liftF $ Probe p o ()
 
-instance MonadTimer (Free (SimF probe VTimeDuration mvar s)) where
-  type Time (Free (SimF probe VTimeDuration mvar s)) = VTime
-  timer t action = Free.liftF $ Timer t action ()
+instance Functor g => MonadProbe (Free (Sum (SimF g probe time mvar s) g)) where
+  type Probe (Free (Sum (SimF g probe time mvar s) g)) = probe s
+  probeOutput p o = Free.liftF $ InL $ Probe p o ()
 
-instance MonadConc (Free (SimF probe time (SimMVar s) s)) where
-  type MVar (Free (SimF probe time (SimMVar s) s)) = SimMVar s
+instance (Functor g, TimeMeasure time) => MonadTimer (Free (SimF g probe time mvar s)) where
+  type Time (Free (SimF g probe time mvar s)) = time
+  timer t action = Free.liftF $ Timer t (Free.hoistFree InL action) ()
 
-  fork          task = Free.liftF $ Fork task ()
+instance (Functor g, TimeMeasure time) => MonadTimer (Free (Sum (SimF g probe time mvar s) g)) where
+  type Time (Free (Sum (SimF g probe time mvar s) g)) = time
+  timer t action = Free.liftF $ InL $ Timer t action ()
+
+instance Functor g => MonadConc (Free (SimF g probe time mvar s)) where
+  type MVar (Free (SimF g probe time mvar s)) = mvar
+
+  fork          task = Free.liftF $ Fork (Free.hoistFree (InL @_ @g) task) ()
   newEmptyMVar       = Free.liftF $ NewEmptyMVar id
   newMVar          x = do mvar <- newEmptyMVar; putMVar mvar x; return mvar
   tryPutMVar  mvar x = Free.liftF $ TryPutMVar mvar x id
@@ -318,19 +338,19 @@ instance MonadConc (Free (SimF probe time (SimMVar s) s)) where
   takeMVar    mvar   = Free.liftF $ TakeMVar mvar id
   putMVar     mvar x = Free.liftF $ PutMVar  mvar x ()
 
--- TODO: there's an obstraction to build @MonadConc@ instance for
--- @Free (Sum (SimF s) g)@  (see the comment above `fork`), but this might not
--- be a problem for us.
-{--
-  - instance (Functor g) => MonadConc (Free (Sum (SimF s) g)) where
-  -   type MVar (Free (Sum (SimF s) g)) = MVar (Free (SimF s))
-  -
-  -   -- `task :: Free (Sum SimF s) g ()` but `_task :: Free SimF ()`
-  -   fork task = Free $ InL (Fork _task (return ()))
-  --}
+instance Functor g => MonadConc (Free (Sum (SimF g probe time mvar s) g)) where
+  type MVar (Free (Sum (SimF g probe time mvar s) g)) = mvar
 
-instance MonadSendRecv (Free (SimF probe time (SimMVar s) s)) where
-  type BiChan (Free (SimF probe time (SimMVar s) s)) = SimChan (SimMVar s)
+  fork task          = Free $ InL $ Fork task (return ())
+  newEmptyMVar       = Free.liftF $ InL $ NewEmptyMVar id
+  newMVar          x = do mvar <- newEmptyMVar; putMVar mvar x; return mvar
+  tryPutMVar  mvar x = Free.liftF $ InL $ TryPutMVar mvar x id
+  tryTakeMVar mvar   = Free.liftF $ InL $ TryTakeMVar mvar id
+  takeMVar    mvar   = Free.liftF $ InL $ TakeMVar mvar id
+  putMVar     mvar x = Free.liftF $ InL $ PutMVar  mvar x ()
+
+instance Functor g => MonadSendRecv (Free (SimF g probe time mvar s)) where
+  type BiChan (Free (SimF g probe time mvar s)) = SimChan mvar
 
   newChan = SimChan <$> newEmptyMVar <*> newEmptyMVar
   sendMsg (SimChan  s _r) = putMVar  s
@@ -340,10 +360,10 @@ data SimChan mvar send recv = SimChan (mvar send) (mvar recv)
 
 flipSimChan (SimChan unichanAB unichanBA) = SimChan unichanBA unichanAB
 
-data SimState s = SimState {
-       runqueue :: ![Thread s],
+data SimState g s = SimState {
+       runqueue :: ![Thread g s],
        curTime  :: !VTime,
-       timers   :: !(PQueue VTime (Action s)),
+       timers   :: !(PQueue VTime (Action g s)),
        prng     :: !StdGen
      }
 
@@ -378,19 +398,19 @@ newProbe = SimProbe <$> newSTRef []
 readProbe :: SimProbe s a -> ST s (ProbeTrace a)
 readProbe (SimProbe p) = reverse <$> readSTRef p
 
-runSimM :: PrngSeed -> (forall s. SimM SimProbe VTimeDuration (SimMVar s) s ()) -> Trace
+runSimM :: forall g . Functor g => PrngSeed -> (forall s. Free (Sum (SimF g SimProbe VTime (SimMVar g s) s) g) ()) -> Trace
 runSimM prngseed initialThread = runST (runSimMST prngseed initialThread)
 
-runSimMST :: forall s. PrngSeed -> SimM SimProbe VTimeDuration (SimMVar s) s () -> ST s Trace
+runSimMST :: forall g s. Functor g => PrngSeed -> Free (Sum (SimF g SimProbe VTime (SimMVar g s) s) g) () -> ST s Trace
 runSimMST prngseed initialThread = schedule initialState
   where
-    initialState :: SimState s
+    initialState :: SimState g s
     initialState = SimState [Thread "main" initialThread]
                             (VTime 0)
                             PQueue.empty
                             (mkStdGen prngseed)
 
-schedule :: SimState s -> ST s Trace
+schedule :: forall g s . Functor g => SimState g s -> ST s Trace
 
 -- at least one runnable thread, run it one step
 schedule simstate@SimState {
@@ -404,21 +424,21 @@ schedule simstate@SimState {
       trace <- schedule simstate { runqueue = remaining }
       return ((time,tid,EventThreadStopped):trace)
 
-    Free (Fail msg) -> do
+    Free (InL (Fail msg)) -> do
       -- stop the whole sim on failure
       return ((time,tid,EventFail msg):[])
 
-    Free (Say msg k) -> do
+    Free (InL (Say msg k)) -> do
       let thread' = Thread tid k
       trace <- schedule simstate { runqueue = thread':remaining }
       return ((time,tid,EventSay msg):trace)
 
-    Free (Probe (SimProbe p) o k) -> do
+    Free (InL (Probe (SimProbe p) o k)) -> do
       modifySTRef p ((time, o):)
       let thread' = Thread tid k
       schedule simstate { runqueue = thread':remaining }
 
-    Free (Timer t a k) -> do
+    Free (InL (Timer t a k)) -> do
       let expiry  = t `addTime` time
           timers' = PQueue.insert expiry a timers
           thread' = Thread tid k
@@ -426,21 +446,21 @@ schedule simstate@SimState {
                                  , timers   = timers' }
       return ((time,tid,EventTimerCreated expiry):trace)
 
-    Free (Fork a k) -> do
+    Free (InL (Fork a k)) -> do
       let thread'  = Thread tid  k
           tid'     = "TODO"
           thread'' = Thread tid' a
       trace <- schedule simstate { runqueue = thread':thread'':remaining }
       return ((time,tid,EventThreadForked tid'):trace)
 
-    Free (NewEmptyMVar k) -> do
+    Free (InL (NewEmptyMVar k)) -> do
       v <- newSTRef (MVarEmpty [])
       let vtag    = "TODO"
           thread' = Thread tid (k (SimMVar v vtag))
       trace <- schedule simstate { runqueue = thread':remaining }
       return ((time,tid,EventCreatedMVar vtag):trace)
 
-    Free (PutMVar (SimMVar v vtag) x k) -> do
+    Free (InL (PutMVar (SimMVar v vtag) x k)) -> do
       ms <- readSTRef v
       case ms of
         MVarEmpty (t:ts) -> do
@@ -466,7 +486,7 @@ schedule simstate@SimState {
           trace <- schedule simstate { runqueue = remaining }
           return ((time,tid,EventBlockedOnPutMVar vtag):trace)
 
-    Free (TryPutMVar (SimMVar v vtag) x k) -> do
+    Free (InL (TryPutMVar (SimMVar v vtag) x k)) -> do
       ms <- readSTRef v
       case ms of
         MVarEmpty (t:ts) -> do
@@ -492,7 +512,7 @@ schedule simstate@SimState {
           trace <- schedule simstate { runqueue = thread':remaining }
           return ((time,tid,EventFailedTryPutMVar vtag):trace)
 
-    Free (TakeMVar (SimMVar v vtag) k) -> do
+    Free (InL (TakeMVar (SimMVar v vtag) k)) -> do
       ms <- readSTRef v
       case ms of
         MVarFull x ((x', t):ts) -> do
@@ -519,7 +539,7 @@ schedule simstate@SimState {
           trace <- schedule simstate { runqueue = remaining }
           return ((time,tid,EventBlockedOnTakeMVar vtag):trace)
 
-    Free (TryTakeMVar (SimMVar v vtag) k) -> do
+    Free (InL (TryTakeMVar (SimMVar v vtag) k)) -> do
       ms <- readSTRef v
       case ms of
         MVarFull x ((x', t):ts) -> do
@@ -572,15 +592,22 @@ removeMinimums = \pqueue ->
 
 runSimWithSendRecvIO'
     :: forall s a chan .
-       (forall x. SimF IOProbe Microsecond MVar.MVar s x -> IO x)
+       (forall x. SimF (SendRecvF chan) IOProbe Microsecond MVar.MVar s x -> IO x)
     -> (forall x. SendRecvF chan x -> IO x)
-    -> Free (Sum (SimF IOProbe Microsecond MVar.MVar s) (SendRecvF chan)) a
+    -> Free (Sum (SimF (SendRecvF chan) IOProbe Microsecond MVar.MVar s) (SendRecvF chan)) a
     -> IO a
 runSimWithSendRecvIO' natSimF natSendRecvF = Free.foldFree nat
     where
-    nat :: forall x . Sum (SimF IOProbe Microsecond MVar.MVar s) (SendRecvF chan) x -> IO x
+    nat :: forall x . Sum (SimF (SendRecvF chan) IOProbe Microsecond MVar.MVar s) (SendRecvF chan) x -> IO x
     nat (InL a) = natSimF a
     nat (InR a) = natSendRecvF a
+
+sumnat
+    :: (forall x. f x -> h x)
+    -> (forall x. g x -> h x)
+    -> Sum f g x -> h x
+sumnat lnat _  (InL fx) = lnat fx
+sumnat _ rnat  (InR gx) = rnat gx
 
 -- note:
 -- if @MonadProbe@ and friends stored the associated type in class
@@ -588,24 +615,27 @@ runSimWithSendRecvIO' natSimF natSendRecvF = Free.foldFree nat
 -- @
 --  runSimM :: (MonadSay m, MonadProbe m probe, ...) => SimF probe time mvar s a -> m a
 -- @
-runSimIO :: SimF IOProbe Microsecond MVar.MVar Void a -> IO a
-runSimIO (Fail s)       = fail s
-runSimIO (Say ss k)     = traverse say ss $> k
-runSimIO (Probe p o k)  = probeOutput p o $> k
-runSimIO (Timer t fa k) = timer t (Free.foldFree runSimIO fa) $> k
-runSimIO (Fork fa k)    = fork (Free.foldFree runSimIO fa) $> k
-runSimIO (NewEmptyMVar k) = newEmptyMVar >>= return . k
-runSimIO (TakeMVar v k)   = takeMVar v >>= return . k
-runSimIO (PutMVar v a k)  = putMVar v a $> k
-runSimIO (TryTakeMVar v k) = tryTakeMVar v >>= return . k
-runSimIO (TryPutMVar v a k)  = tryPutMVar v a >>= return . k
+runSimIO
+    :: forall g a. Functor g
+    => (forall x. g x -> IO x)
+    -> SimF g IOProbe Microsecond MVar.MVar Void a -> IO a
+runSimIO _ (Fail s)       = fail s
+runSimIO _ (Say ss k)     = traverse say ss $> k
+runSimIO _ (Probe p o k)  = probeOutput p o $> k
+runSimIO nat (Timer t fa k) = timer t (Free.foldFree (sumnat (runSimIO nat) nat) fa) $> k
+runSimIO nat (Fork fa k)    = fork (Free.foldFree (sumnat (runSimIO nat) nat) fa) $> k
+runSimIO _ (NewEmptyMVar k) = newEmptyMVar >>= return . k
+runSimIO _ (TakeMVar v k)   = takeMVar v >>= return . k
+runSimIO _ (PutMVar v a k)  = putMVar v a $> k
+runSimIO _ (TryTakeMVar v k) = tryTakeMVar v >>= return . k
+runSimIO _ (TryPutMVar v a k)  = tryPutMVar v a >>= return . k
 
 runSimWithSendRecvIO
     :: forall a chan .
        (forall x. SendRecvF chan x -> IO x)
-    -> Free (Sum (SimF IOProbe Microsecond MVar.MVar Void) (SendRecvF chan)) a
+    -> Free (Sum (SimF (SendRecvF chan) IOProbe Microsecond MVar.MVar Void) (SendRecvF chan)) a
     -> IO a
-runSimWithSendRecvIO natSendRecvF = runSimWithSendRecvIO' runSimIO natSendRecvF
+runSimWithSendRecvIO nat = runSimWithSendRecvIO' (runSimIO nat) nat
 
 example0 :: (MonadSay m, MonadTimer m, MonadConc m) => m ()
 example0 = do
@@ -618,28 +648,48 @@ example0 = do
   takeMVar v
   say "main done"
 
-example1 :: [a] -> ST s (Trace, ProbeTrace a)
+example1 :: forall s a. [a] -> ST s (Trace, ProbeTrace a)
 example1 xs = do
-    p <- newProbe
-    trace <- runSimMST prngseed $ do
+    (p :: SimProbe s a) <- newProbe
+    trace <- runSimMST @(Const ()) prngseed $ do
       v <- newEmptyMVar
-      fork (producer v)
-      fork (consumer v p)
+      return ()
+      -- fork (producer v)
+      -- fork (consumer v p)
     ptrace <- readProbe p
     return (trace, ptrace)
   where
     prngseed   = 0
+
+    producer :: forall time probe .
+                ( Enum (Duration time)
+                , TimeMeasure time
+                )
+             => SimMVar (Const ()) s a
+             -> Free (Sum (SimF (Const ()) probe time (SimMVar (Const ()) s) s) (Const ())) ()
     producer v =
       sequence_ [ timer delay $ putMVar v x
                 | (delay, x) <- zip [1..] xs ]
 
+    consumer
+        :: SimMVar (Const ()) s a
+        -> Probe (Free (Sum (SimF (Const ()) probe time (SimMVar (Const ()) s) s) (Const ()))) a
+        -> Free (Sum (SimF (Const ()) probe time (SimMVar (Const ()) s) s) (Const ())) ()
     consumer v p = forever $ do
       x <- takeMVar v
       probeOutput p x
 
-example2 :: forall prb s . TestChainAndUpdates -> Free (Sum (SimF SimProbe VTimeDuration (SimMVar s) s) (SendRecvF (SimChan (SimMVar s)))) ()
-example2 = \(TestChainAndUpdates _c us) -> do
-    chainvar <- hoistFree InL newEmptyMVar
+example2
+  :: forall probe time mvar p c s .
+     ( mvar ~ MVar (Free (SimF (SendRecvF (SimChan mvar)) probe time mvar s))
+     , BiChan (Free (SimF (SendRecvF (SimChan mvar)) probe time mvar s)) ~ SimChan mvar
+     , Enum (Duration (Time (Free (SimF (SendRecvF (SimChan mvar)) probe time mvar s))))
+     , MonadTimer (Free (SimF (SendRecvF (SimChan mvar)) probe time mvar s))
+     )
+  => TestChainAndUpdates
+  -> Free (Sum (SimF (SendRecvF (SimChan mvar)) probe time mvar s) (SendRecvF (SimChan mvar))) ()
+example2 (TestChainAndUpdates _c us) = do
+    chainvar <- Free.liftF $ InL (NewEmptyMVar id)
     hoistFree InL $ fork $ generator chainvar us
     simulateWire (producer chainvar) consumer
   where
@@ -653,17 +703,17 @@ example2 = \(TestChainAndUpdates _c us) -> do
                 mapM_ (putMVar chainvar . RollForward) bs
         | (d, u) <- zip [1..] us ]
 
-    producer :: forall probe time . SimMVar s (ConsumeChain Block)
-             -> SimChan (SimMVar s) MsgProducer MsgConsumer
-             -> SimM probe time (SimMVar s) s ()
+    producer :: mvar (ConsumeChain Block)
+             -> SimChan mvar MsgProducer MsgConsumer
+             -> Free (Sum (SimF (SendRecvF (SimChan mvar)) probe time mvar s) (SendRecvF (SimChan mvar))) ()
     producer chainvar =
       producerSideProtocol1
         (\_rid -> tryTakeMVar chainvar)
         (\_rid -> takeMVar chainvar)
         0 --TODO: dummy rid
 
-    consumer :: forall probe time . SimChan (SimMVar s) MsgConsumer MsgProducer
-             -> SimM probe time (SimMVar s) s ()
+    consumer :: SimChan mvar MsgConsumer MsgProducer
+             -> Free (Sum (SimF (SendRecvF (SimChan mvar)) probe time mvar s) (SendRecvF (SimChan mvar))) ()
     consumer =
       consumerSideProtocol1
         (\b -> say ("addBlock " ++ show b))
