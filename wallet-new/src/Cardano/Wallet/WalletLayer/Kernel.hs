@@ -28,6 +28,7 @@ import           Cardano.Wallet.Kernel.Types (RawResolvedBlock (..),
 import qualified Cardano.Wallet.WalletLayer.Kernel.Accounts as Accounts
 import qualified Cardano.Wallet.WalletLayer.Kernel.Active as Active
 import qualified Cardano.Wallet.WalletLayer.Kernel.Addresses as Addresses
+import qualified Cardano.Wallet.WalletLayer.Kernel.Transactions as Transactions
 import qualified Cardano.Wallet.WalletLayer.Kernel.Wallets as Wallets
 import           Cardano.Wallet.WalletLayer.Types (ActiveWalletLayer (..),
                      PassiveWalletLayer (..))
@@ -75,6 +76,7 @@ bracketPassiveWallet logFunction keystore rocksDB f =
         , _pwlGetAccounts          = \wId     -> ro $ Accounts.getAccounts wId
         , _pwlGetAccount           = \wId acc -> ro $ Accounts.getAccount  wId acc
         , _pwlGetAddresses         = error "Not implemented!"
+        , _pwlGetTransactions      = Transactions.getTransactions wallet
         }
       where
         -- Read-only operations
