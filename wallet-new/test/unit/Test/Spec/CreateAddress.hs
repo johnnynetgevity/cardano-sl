@@ -1,6 +1,13 @@
 {-# LANGUAGE TypeApplications #-}
 {-# OPTIONS_GHC -fno-warn-orphans #-}
-module Test.Spec.CreateAddress (spec) where
+module Test.Spec.CreateAddress (
+      spec
+
+    -- Public to be used by other testing modules.
+    , Fixture (..)
+    , prepareFixtures
+    , withFixture
+    ) where
 
 import           Universum
 
