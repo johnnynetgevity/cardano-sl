@@ -4,8 +4,6 @@ module Test.Spec.Kernel (
 
 import           Universum
 
-import qualified Data.List as List
-
 import qualified Data.Set as Set
 
 import qualified Cardano.Wallet.Kernel as Kernel
@@ -50,6 +48,9 @@ spec =
           it "...blockMetaScenarioC" $ bracketActiveWallet $ checkBlockMeta' (blockMetaScenarioC genesis)
           it "...blockMetaScenarioD" $ bracketActiveWallet $ checkBlockMeta' (blockMetaScenarioD genesis)
           it "...blockMetaScenarioE" $ bracketActiveWallet $ checkBlockMeta' (blockMetaScenarioE genesis)
+          it "...blockMetaScenarioF" $ bracketActiveWallet $ checkBlockMeta' (blockMetaScenarioF genesis)
+          it "...blockMetaScenarioG" $ bracketActiveWallet $ checkBlockMeta' (blockMetaScenarioG genesis)
+          it "...blockMetaScenarioH" $ bracketActiveWallet $ checkBlockMeta' (blockMetaScenarioH genesis)
 
       describe "Using hand-written inductive wallets" $ do
         it "computes identical results in presence of dependent pending transactions" $
@@ -66,7 +67,10 @@ spec =
   where
     transCtxt = runTranslateNoErrors ask
     boot      = bootstrapTransaction transCtxt
-    model     = (cardanoModel linearFeePolicy 0 10 boot)
+
+    ourActorIx   = 0
+    numPoorAddrs = 10
+    model        = (cardanoModel linearFeePolicy ourActorIx numPoorAddrs boot)
 
     -- TODO: These constants should not be hardcoded here.
     linearFeePolicy :: TxSizeLinear
@@ -93,22 +97,16 @@ spec =
        fmap (fmap snd) $ runTranslateTNoErrors $ do
          equivalentT activeWallet esk (mkWallet ours') ind
       where
-        -- TODO (@uroboros/ryan) lookup poor actor + esk in TransCtxt.PoorActors
-        (Addr actorIx _addrIx) = List.head $ Set.toList (inductiveOurs ind)
-        esk = deriveRootEsk actorIx
-
+        esk = deriveRootEsk (IxPoor ourActorIx)
         -- all addresses belonging to this poor actor
         ours' a = a `Set.member` (inductiveOurs ind)
 
-    -- | Derive ESK from the poor actor by
-    --   resolving the actor's first HD address to get to the master ESK
-    deriveRootEsk actorIx = encKpEnc ekp
-        where
-          addrIx  = 0 -- we can assume that the first HD address of the Poor actor exists
-          addr    = Addr actorIx addrIx
-
-          AddrInfo{..} = resolveAddr addr transCtxt
-          Just ekp     = addrInfoMasterKey
+        -- | Derive ESK from the poor actor by resolving the actor's first HD address
+        deriveRootEsk actorIx = encKpEnc ekp
+            where
+              addrIx       = 0 -- we can assume that the first HD address of the Poor actor exists
+              AddrInfo{..} = resolveAddr (Addr actorIx addrIx) transCtxt
+              Just ekp     = addrInfoMasterKey
 
     evaluate' :: forall h. Hash h Addr
              => Kernel.ActiveWallet

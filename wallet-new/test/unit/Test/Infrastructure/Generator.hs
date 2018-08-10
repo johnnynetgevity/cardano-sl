@@ -48,9 +48,6 @@ data GeneratorModel h a = GeneratorModel {
      -- | Which subset of 'gmAllAddresses' can we choose from for @ours@?
     , gmOurs :: Set a
 
-      -- | Maximum number of addresses to use for @ours@
-    , gmMaxNumOurs    :: Int
-
       -- | Estimate fees
     , gmEstimateFee   :: Int -> [Value] -> Value
     }
@@ -66,18 +63,15 @@ genChainUsingModel GeneratorModel{..} =
 genInductiveUsingModel :: (Hash h a, Ord a)
                        => GeneratorModel h a -> Gen (Inductive h a)
 genInductiveUsingModel GeneratorModel{..} = do
-    events <- evalStateT (genWalletEvents (params ours)) initState
+    events <- evalStateT (genWalletEvents (params gmOurs)) initState
     return Inductive {
         inductiveBoot   = gmBoot
-      , inductiveOurs   = ours
+      , inductiveOurs   = gmOurs
       , inductiveEvents = events
       }
   where
     initUtxo  = utxoRestrictToAddr (`elem` gmAllAddresses) $ trUtxo gmBoot
     initState = initEventsGlobalState 1
-
-    numOurs   = min (Set.size gmOurs) gmMaxNumOurs
-    ours      = Set.take numOurs gmOurs
 
     params ours'  = defEventsParams gmEstimateFee gmAllAddresses ours' initUtxo
 
@@ -93,7 +87,6 @@ simpleModel = GeneratorModel {
       gmAllAddresses  = addrs
     , gmOurs          = Set.fromList addrs
     , gmEstimateFee   = \_ _ -> 0
-    , gmMaxNumOurs    = 3
     , gmBoot          = Transaction {
                             trFresh = fromIntegral (length addrs) * initBal
                           , trIns   = Set.empty
@@ -121,8 +114,8 @@ simpleModel = GeneratorModel {
 -- actors, large values, etc., and so is a bit difficult to debug when
 -- looking at values manually.
 cardanoModel :: TxSizeLinear
-             -> Int -- ^^ "our" actor of interest
-             -> Int -- ^^ number of addresses to create for poor actors
+             -> Int -- ^ "our" actor, the owner of all "our" addresses
+             -> Int -- ^ number of addresses to create for poor actors
              -> Transaction GivenHash Addr
              -> GeneratorModel GivenHash Addr
 cardanoModel linearFeePolicy ourActor numPoorAddrs boot =
@@ -131,7 +124,6 @@ cardanoModel linearFeePolicy ourActor numPoorAddrs boot =
     , gmAllAddresses  = richAddrs ++ concat (Map.elems poorAddrs)
     , gmOurs          = Set.fromList ourAddrs
     , gmEstimateFee   = estimateCardanoFee linearFeePolicy
-    , gmMaxNumOurs    = 10
     }
     where
         Just ourAddrs = Map.lookup ourActor poorAddrs

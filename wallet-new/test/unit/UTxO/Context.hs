@@ -461,7 +461,7 @@ initAddrMap Actors{..} = AddrMap{
             addrIx0 = wAddressGenesisIndex
             poorSec = encKpEnc poorKey
 
-            numPoorAddrs = 10 -- TODO @@@
+            numPoorAddrs = 10 -- TODO @uroboros/ryan this must be aligned with number used when constructing a cardanoModel
             addrIxs = map (\i -> (i, addrIx0 + (fromIntegral i)) )
                           [0 .. numPoorAddrs - 1]
 

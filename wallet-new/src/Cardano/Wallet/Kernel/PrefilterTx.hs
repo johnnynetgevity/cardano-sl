@@ -331,9 +331,8 @@ mkAddressMeta addrs
 --   NOTE: Since there will be at least one AddressSummary per Address,
 --   we can safely use NE.fromList.
 indexByAddr :: [AddressSummary] -> Map Address (NE.NonEmpty AddressSummary)
-indexByAddr addrs
-    -- TODO @uroboros/ryan construct NE lists and use NE.concat (would need NE.concat)
-    = Map.map NE.fromList (Map.fromListWith (++) addrs')
+indexByAddr addrs =
+    Map.map NE.fromList (Map.fromListWith (++) addrs')
     where
         fromAddrSummary addrSummary = (addrSummaryAddr addrSummary, [addrSummary])
         addrs' = map fromAddrSummary addrs
