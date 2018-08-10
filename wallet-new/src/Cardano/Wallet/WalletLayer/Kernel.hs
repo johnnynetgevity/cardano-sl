@@ -76,7 +76,7 @@ bracketPassiveWallet logFunction keystore rocksDB f =
         , _pwlGetAccounts          = \wId     -> ro $ Accounts.getAccounts wId
         , _pwlGetAccount           = \wId acc -> ro $ Accounts.getAccount  wId acc
         , _pwlGetAddresses         = error "Not implemented!"
-        , _pwlGetTransactions      = Transactions.getTransactions wallet
+        , _pwlGetTransactions      = Transactions.getTransactions w
         }
       where
         -- Read-only operations

@@ -37,7 +37,7 @@ import qualified Cardano.Wallet.API.V1.Types as V1
 import           Pos.Core as Core
 -- import           Pos.Core.Txp
 import           Pos.Crypto.Hashing
-import qualified Test.Spec.CreateAddress as CreateAddress hiding (spec)
+import qualified Test.Spec.CreateAddress as CreateAddress
 -- import qualified Test.Spec.Fixture as Fixture
 import           Test.Spec.CoinSelection.Generators (InitialBalance (..),
                      Pay (..))
@@ -52,7 +52,7 @@ spec :: Spec
 spec =
     describe "GetTransactions" $ do
 
-        prop "scenario: Layer.CreateAddress -> TxMeta.putTxMeta -> Layer.getTransactions works properly. Tx status is Applying" $ withMaxSuccess 50 $
+        prop "scenario: Layer.CreateAddress -> TxMeta.putTxMeta -> Layer.getTransactions works properly." $ withMaxSuccess 50 $
             monadicIO $ do
                 testMetaSTB <- pick genMeta
                 CreateAddress.withFixture $ \keystore layer pwallet CreateAddress.Fixture{..} -> do
@@ -97,7 +97,7 @@ spec =
                                 Left l -> expectationFailure $ "returned " <> show l
                                 Right resp -> check resp
 
-        prop "scenario: Layer.pay -> TxMeta.putTxMeta -> Layer.getTransactions works properly " $ withMaxSuccess 50 $
+        prop "scenario: Layer.pay -> TxMeta.putTxMeta -> Layer.getTransactions works properly. Tx status should be Applying " $ withMaxSuccess 50 $
             monadicIO $ do
                 testMetaSTB <- pick genMeta
                 NewPayment.withFixture @IO (InitialADA 10000) (PayLovelace 10) $ \keystore activeLayer aw NewPayment.Fixture{..} -> do
